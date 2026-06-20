@@ -1,0 +1,89 @@
+// WMS Lite 数据模型
+// 数据库：SQLite（开发环境）
+// ORM：Prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== 枚举（SQLite 不支持 enum，用 String 模拟，在代码层约束） ====================
+
+// 用户角色
+// ADMIN  - 管理员，拥有所有权限
+// STAFF  - 仓库人员，仅可操作入库/出库/库存查询
+// model User.role: String
+
+// 流水类型
+// IN         - 采购入库
+// OUT        - 销售出库
+// RETURN_IN  - 销售退货（库存增加）
+// RETURN_OUT - 采购退货（库存减少）
+// model TransactionLog.type: String
+
+// ==================== 模型 ====================
+
+/// 用户表 — 认证与权限
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  password  String              // bcrypt 哈希存储
+  name      String              // 显示名称
+  role      String   @default("STAFF")  // ADMIN | STAFF
+  createdAt DateTime @default(now())
+}
+
+/// 商品表 — SKU 编码支持扫码/输入编码操作
+model Product {
+  id        Int         @id @default(autoincrement())
+  sku       String      @unique        // 商品编码（唯一，用于扫码反查）
+  name      String
+  spec      String?                    // 规格描述（可选）
+  inventory Inventory[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
+
+/// 仓库表 — code 字段支持编码定位仓库
+model Warehouse {
+  id        Int         @id @default(autoincrement())
+  code      String      @unique        // 仓库编码（唯一，用于扫码反查）
+  name      String
+  address   String?                    // 仓库地址（可选）
+  inventory Inventory[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
+
+/// 库存表 — 商品+仓库联合唯一，记录可用库存数量
+model Inventory {
+  id           Int              @id @default(autoincrement())
+  productId    Int
+  warehouseId  Int
+  quantity     Int              @default(0)   // 可用库存
+  product      Product          @relation(fields: [productId], references: [id])
+  warehouse    Warehouse        @relation(fields: [warehouseId], references: [id])
+  transactions TransactionLog[]
+
+  @@unique([productId, warehouseId])   // 同一商品在同一仓库只有一条库存记录
+}
+
+/// 流水记录表 — 所有出入库操作的审计日志
+model TransactionLog {
+  id          Int        @id @default(autoincrement())
+  bizNo       String     @unique       // 业务单号（UUID），幂等性保证，防止重复提交
+  productId   Int
+  warehouseId Int
+  type        String                   // IN | OUT | RETURN_IN | RETURN_OUT
+  quantity    Int                      // 操作数量（始终为正数）
+  operatorId  Int                      // 操作人 ID（关联 User）
+  remark      String?                  // 备注（退货原因等）
+  createdAt   DateTime   @default(now())
+
+  @@index([productId, warehouseId])    // 按商品+仓库查询流水
+  @@index([createdAt])                 // 按时间范围查询流水
+}
