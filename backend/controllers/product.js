@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma')
+const { parseSort } = require('../lib/sort')
 
 /**
  * 商品控制器 — CRUD 操作
@@ -53,7 +54,7 @@ exports.update = async (req, res, next) => {
   }
 }
 
-// 商品列表（支持 name/sku 模糊搜索）
+// 商品列表（支持 name/sku 模糊搜索 + 排序）
 exports.list = async (req, res, next) => {
   try {
     const { keyword, page = 1, pageSize = 20 } = req.query
@@ -69,8 +70,10 @@ exports.list = async (req, res, next) => {
         }
       : {}
 
+    const orderBy = parseSort(req.query, ['createdAt', 'name', 'sku'])
+
     const [list, total] = await prisma.$transaction([
-      prisma.product.findMany({ where, skip, take: Number(pageSize), orderBy: { createdAt: 'desc' } }),
+      prisma.product.findMany({ where, skip, take: Number(pageSize), orderBy }),
       prisma.product.count({ where }),
     ])
 
@@ -80,14 +83,13 @@ exports.list = async (req, res, next) => {
   }
 }
 
-// 商品详情
+// 商品详情（库存走 /inventory?productId=X）
 exports.detail = async (req, res, next) => {
   try {
     const { id } = req.params
 
     const product = await prisma.product.findUnique({
       where: { id: Number(id) },
-      include: { inventory: { include: { warehouse: true } } },
     })
 
     if (!product) {
