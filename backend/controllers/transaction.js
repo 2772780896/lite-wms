@@ -8,6 +8,12 @@ const { parseSort } = require('../lib/sort')
  *   1. 校验 bizNo 幂等性（TransactionLog.bizNo @unique）
  *   2. 事务内：原子操作 Inventory + create TransactionLog
  *
+ * 自然键设计：
+ *   Inventory 和 TransactionLog 的外键直接是 sku + warehouseCode，
+ *   接口接收什么就存什么，无需反查内部 ID。
+ *   如果 sku 或 warehouseCode 不存在，外键约束自动报错（P2003），
+ *   在 catch 中统一处理为 404。
+ *
  * 库存扣减采用原子 UPDATE + WHERE 边界：
  *   UPDATE ... SET quantity = quantity - N WHERE quantity >= N
  *   数据库层面保证并发安全，无竞态窗口
@@ -19,9 +25,9 @@ const { parseSort } = require('../lib/sort')
 // ==================== 入库 ====================
 exports.inbound = async (req, res, next) => {
   try {
-    const { bizNo, productId, warehouseId, quantity } = req.body
+    const { bizNo, sku, warehouseCode, quantity } = req.body
 
-    if (!bizNo || !productId || !warehouseId || !quantity) {
+    if (!bizNo || !sku || !warehouseCode || !quantity) {
       return res.status(400).json({ code: 400, data: null, message: '参数缺失' })
     }
     if (quantity <= 0) {
@@ -34,29 +40,34 @@ exports.inbound = async (req, res, next) => {
       return res.json({ code: 0, data: existing, message: '已处理（重复请求）' })
     }
 
-    // 事务：upsert 库存 + 写流水
+    // 事务：upsert 库存 + 写流水（sku/warehouseCode 直接作为外键，无需反查）
     const log = await prisma.$transaction(async (tx) => {
       // upsert：存在则 increment，不存在则 create
+      // 如果 sku 或 warehouseCode 不存在，外键约束会报 P2003
       await tx.inventory.upsert({
-        where: { productId_warehouseId: { productId: Number(productId), warehouseId: Number(warehouseId) } },
+        where: { sku_warehouseCode: { sku, warehouseCode } },
         update: { quantity: { increment: Number(quantity) } },
-        create: { productId: Number(productId), warehouseId: Number(warehouseId), quantity: Number(quantity) },
+        create: { sku, warehouseCode, quantity: Number(quantity) },
       })
 
       return tx.transactionLog.create({
         data: {
           bizNo,
-          productId: Number(productId),
-          warehouseId: Number(warehouseId),
+          sku,
+          warehouseCode,
           type: 'IN',
           quantity: Number(quantity),
-          operatorId: req.user.id,
+          operatorId: req.user.userId,
         },
       })
     })
 
     res.status(201).json({ code: 0, data: log, message: '入库成功' })
   } catch (err) {
+    // P2003 = 外键约束失败（sku 或 warehouseCode 不存在）
+    if (err.code === 'P2003') {
+      return res.status(404).json({ code: 404, data: null, message: '商品 SKU 或仓库编码不存在' })
+    }
     next(err)
   }
 }
@@ -64,9 +75,9 @@ exports.inbound = async (req, res, next) => {
 // ==================== 出库 ====================
 exports.outbound = async (req, res, next) => {
   try {
-    const { bizNo, productId, warehouseId, quantity } = req.body
+    const { bizNo, sku, warehouseCode, quantity } = req.body
 
-    if (!bizNo || !productId || !warehouseId || !quantity) {
+    if (!bizNo || !sku || !warehouseCode || !quantity) {
       return res.status(400).json({ code: 400, data: null, message: '参数缺失' })
     }
     if (quantity <= 0) {
@@ -83,7 +94,7 @@ exports.outbound = async (req, res, next) => {
       // 数据库层面保证边界，并发安全（无竞态窗口）
       const result = await tx.inventory.updateMany({
         where: {
-          productId_warehouseId: { productId: Number(productId), warehouseId: Number(warehouseId) },
+          sku_warehouseCode: { sku, warehouseCode },
           quantity: { gte: Number(quantity) },
         },
         data: { quantity: { decrement: Number(quantity) } },
@@ -97,17 +108,20 @@ exports.outbound = async (req, res, next) => {
       return tx.transactionLog.create({
         data: {
           bizNo,
-          productId: Number(productId),
-          warehouseId: Number(warehouseId),
+          sku,
+          warehouseCode,
           type: 'OUT',
           quantity: Number(quantity),
-          operatorId: req.user.id,
+          operatorId: req.user.userId,
         },
       })
     })
 
     res.status(201).json({ code: 0, data: log, message: '出库成功' })
   } catch (err) {
+    if (err.code === 'P2003') {
+      return res.status(404).json({ code: 404, data: null, message: '商品 SKU 或仓库编码不存在' })
+    }
     if (err.message === 'STOCK_INSUFFICIENT') {
       return res.status(400).json({ code: 400, data: null, message: '库存不足' })
     }
@@ -118,9 +132,9 @@ exports.outbound = async (req, res, next) => {
 // ==================== 退货 ====================
 exports.return_ = async (req, res, next) => {
   try {
-    const { bizNo, productId, warehouseId, quantity, type, remark } = req.body
+    const { bizNo, sku, warehouseCode, quantity, type, remark } = req.body
 
-    if (!bizNo || !productId || !warehouseId || !quantity || !type || !remark) {
+    if (!bizNo || !sku || !warehouseCode || !quantity || !type || !remark) {
       return res.status(400).json({ code: 400, data: null, message: '参数缺失（remark 必填）' })
     }
     if (!['RETURN_IN', 'RETURN_OUT'].includes(type)) {
@@ -140,7 +154,7 @@ exports.return_ = async (req, res, next) => {
         // RETURN_OUT：原子扣减（同出库逻辑）
         const result = await tx.inventory.updateMany({
           where: {
-            productId_warehouseId: { productId: Number(productId), warehouseId: Number(warehouseId) },
+            sku_warehouseCode: { sku, warehouseCode },
             quantity: { gte: Number(quantity) },
           },
           data: { quantity: { decrement: Number(quantity) } },
@@ -151,20 +165,20 @@ exports.return_ = async (req, res, next) => {
       } else {
         // RETURN_IN：upsert（记录可能不存在，需要 create）
         await tx.inventory.upsert({
-          where: { productId_warehouseId: { productId: Number(productId), warehouseId: Number(warehouseId) } },
+          where: { sku_warehouseCode: { sku, warehouseCode } },
           update: { quantity: { increment: Number(quantity) } },
-          create: { productId: Number(productId), warehouseId: Number(warehouseId), quantity: Number(quantity) },
+          create: { sku, warehouseCode, quantity: Number(quantity) },
         })
       }
 
       return tx.transactionLog.create({
         data: {
           bizNo,
-          productId: Number(productId),
-          warehouseId: Number(warehouseId),
+          sku,
+          warehouseCode,
           type,
           quantity: Number(quantity),
-          operatorId: req.user.id,
+          operatorId: req.user.userId,
           remark,
         },
       })
@@ -172,6 +186,9 @@ exports.return_ = async (req, res, next) => {
 
     res.status(201).json({ code: 0, data: log, message: '退货成功' })
   } catch (err) {
+    if (err.code === 'P2003') {
+      return res.status(404).json({ code: 404, data: null, message: '商品 SKU 或仓库编码不存在' })
+    }
     if (err.message === 'STOCK_INSUFFICIENT') {
       return res.status(400).json({ code: 400, data: null, message: '库存不足' })
     }
@@ -182,12 +199,12 @@ exports.return_ = async (req, res, next) => {
 // ==================== 流水查询 ====================
 exports.list = async (req, res, next) => {
   try {
-    const { productId, warehouseId, type, startDate, endDate, page = 1, pageSize = 20 } = req.query
+    const { sku, warehouseCode, type, startDate, endDate, page = 1, pageSize = 20 } = req.query
 
     // 动态构建 where 条件
     const where = {}
-    if (productId) where.productId = Number(productId)
-    if (warehouseId) where.warehouseId = Number(warehouseId)
+    if (sku) where.sku = sku
+    if (warehouseCode) where.warehouseCode = warehouseCode
     if (type) where.type = type
     if (startDate || endDate) {
       where.createdAt = {}

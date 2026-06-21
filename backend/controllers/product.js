@@ -5,9 +5,9 @@ const { parseSort } = require('../lib/sort')
  * 商品控制器 — CRUD 操作
  *
  * 创建：POST /api/products（ADMIN）
- * 编辑：PUT /api/products/:id（ADMIN）
+ * 编辑：PUT /api/products/:sku（ADMIN）
  * 列表：GET /api/products（ALL，支持 name/sku 模糊搜索）
- * 详情：GET /api/products/:id（ALL）
+ * 详情：GET /api/products/:sku（ALL）
  */
 
 // 新增商品
@@ -36,11 +36,11 @@ exports.create = async (req, res, next) => {
 // 编辑商品
 exports.update = async (req, res, next) => {
   try {
-    const { id } = req.params
+    const { sku } = req.params
     const { name, spec } = req.body
 
     const product = await prisma.product.update({
-      where: { id: Number(id) },
+      where: { sku },
       data: { name, spec },
     })
 
@@ -83,13 +83,13 @@ exports.list = async (req, res, next) => {
   }
 }
 
-// 商品详情（库存走 /inventory?productId=X）
+// 商品详情（库存走 /inventory?sku=X）
 exports.detail = async (req, res, next) => {
   try {
-    const { id } = req.params
+    const { sku } = req.params
 
     const product = await prisma.product.findUnique({
-      where: { id: Number(id) },
+      where: { sku },
     })
 
     if (!product) {

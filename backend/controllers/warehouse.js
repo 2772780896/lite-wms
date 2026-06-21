@@ -26,11 +26,11 @@ exports.create = async (req, res, next) => {
 // 编辑仓库
 exports.update = async (req, res, next) => {
   try {
-    const { id } = req.params
+    const { code } = req.params
     const { name, address } = req.body
 
     const warehouse = await prisma.warehouse.update({
-      where: { id: Number(id) },
+      where: { code },
       data: { name, address },
     })
 
@@ -71,13 +71,13 @@ exports.list = async (req, res, next) => {
   }
 }
 
-// 仓库详情（库存走 /inventory?warehouseId=X）
+// 仓库详情（库存走 /inventory?warehouseCode=X）
 exports.detail = async (req, res, next) => {
   try {
-    const { id } = req.params
+    const { code } = req.params
 
     const warehouse = await prisma.warehouse.findUnique({
-      where: { id: Number(id) },
+      where: { code },
     })
 
     if (!warehouse) {
